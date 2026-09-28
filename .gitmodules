@@ -1,0 +1,3 @@
+[submodule "third_party/nuked-sc55"]
+	path = third_party/nuked-sc55
+	url = https://github.com/elyosh/Nuked-SC55.git
