@@ -5,6 +5,7 @@
 #include "internal/wave_renderer.h"
 #include <imuse/commands.h>
 
+#include <math.h>
 #include <string.h>
 
 #include "internal/mixer_tables.h"
@@ -36,6 +37,8 @@ static int16_t mixer_mixStereo1x(int16_t* dst, const uint8_t* src, const int8_t*
 								 int count);
 static int16_t mixer_mixStereo2x(int16_t* dst, const uint8_t* src, const int8_t* lTable, const int8_t* rTable,
 								 int count);
+static int16_t mixer_mixQuad1x(int16_t* dst, const uint8_t* src, const int8_t* const tables[4], int count);
+static int16_t mixer_mixQuad2x(int16_t* dst, const uint8_t* src, const int8_t* const tables[4], int count);
 static void mixer_compandToPcm8(uint8_t* dst, const int16_t* src, const int8_t* table, int count);
 
 /* ===== Lifecycle ===== */
@@ -72,8 +75,21 @@ int ImMixer_Init(imuse_t* im) {
 		im->mixer.normalization[i] = (int8_t)(128 + q);
 		im->mixer.normalization[-i - 1] = (int8_t)(128 - q - 1);
 	}
+
+	/* Port extension: equal-power front/rear split for the quad bus.
+	 * depth 0 keeps the full pan factor on the front pair, so a quad
+	 * mix of undepthed sounds matches the stereo mix on FL/FR. */
+	for (int depth = 0; depth < 128; ++depth) {
+		const double angle = (double)depth / 127.0 * 1.57079632679489661923;
+		im->mixer.depthGain[depth][0] = (uint8_t)lround(cos(angle) * 128.0);
+		im->mixer.depthGain[depth][1] = (uint8_t)lround(sin(angle) * 128.0);
+	}
 	return 0;
 }
+
+/* Scales a 0..16 pan factor by a Q7 depth gain, staying on the
+ * 17-row volume-curve grid. */
+static int mixer_scaleFactor(int factor, int gain) { return (factor * gain + 64) >> 7; }
 
 int ImMixer_Deinit(imuse_t* im) {
 	/* Static LUT + per-frame pointers are the only state; no
@@ -115,7 +131,8 @@ int ImMixer_audioWriteToDriver(imuse_t* im) {
 
 /* ===== Mix dispatcher ===== */
 
-int16_t ImMixer_audioProcessFrame(imuse_t* im, ImSoundFrameState* state, int offset, int volume, int pan) {
+int16_t ImMixer_audioProcessFrame(imuse_t* im, ImSoundFrameState* state, int offset, int volume, int pan,
+								  int depth) {
 	/* Guard rails — silently drop frames when the pipeline
 	 * isn't primed or the slice has no samples. */
 	if (!im->mixer.outBuf || !im->mixer.driverOutPtr || !im->mixer.driverOutPtr->buffer || !state->count)
@@ -141,17 +158,35 @@ int16_t ImMixer_audioProcessFrame(imuse_t* im, ImSoundFrameState* state, int off
 		int lPanFactor = (int8_t)s_panTableBase[volBucket][8 - panBucket];
 		int rPanFactor = (int8_t)s_panTableBase[volBucket][8 + panBucket];
 
-		const int8_t* lTable;
-		const int8_t* rTable;
-		if (im->mixer.driverOutPtr->stereoMode == 1) {
-			lTable = &s_volumeCurves256[lPanFactor][0];
-			rTable = &s_volumeCurves256[rPanFactor][0];
-		} else {
-			/* stereoMode == 2: L/R physically swapped. */
-			lTable = &s_volumeCurves256[rPanFactor][0];
-			rTable = &s_volumeCurves256[lPanFactor][0];
+		if (im->mixer.driverOutPtr->stereoMode == 2) {
+			/* L/R physically swapped. */
+			int swapped = lPanFactor;
+			lPanFactor = rPanFactor;
+			rPanFactor = swapped;
 		}
 
+		if (stride == 4) {
+			/* Port quad bus: split each side front/rear by depth. */
+			if (depth < 0)
+				depth = 0;
+			if (depth > 127)
+				depth = 127;
+			const int frontGain = im->mixer.depthGain[depth][0];
+			const int rearGain = im->mixer.depthGain[depth][1];
+			const int8_t* const tables[4] = {
+				&s_volumeCurves256[mixer_scaleFactor(lPanFactor, frontGain)][0],
+				&s_volumeCurves256[mixer_scaleFactor(rPanFactor, frontGain)][0],
+				&s_volumeCurves256[mixer_scaleFactor(lPanFactor, rearGain)][0],
+				&s_volumeCurves256[mixer_scaleFactor(rPanFactor, rearGain)][0],
+			};
+			int writeOffset = stride * offset;
+			if (state->sourceIsHighRate == 1)
+				return mixer_mixQuad1x(&im->mixer.outBuf[writeOffset], state->buffer, tables, state->count);
+			return mixer_mixQuad2x(&im->mixer.outBuf[writeOffset], state->buffer, tables, state->count);
+		}
+
+		const int8_t* lTable = &s_volumeCurves256[lPanFactor][0];
+		const int8_t* rTable = &s_volumeCurves256[rPanFactor][0];
 		int writeOffset = stride * offset;
 		if (state->sourceIsHighRate == 1)
 			return mixer_mixStereo1x(&im->mixer.outBuf[writeOffset], state->buffer, lTable, rTable,
@@ -186,7 +221,7 @@ int16_t ImMixer_AddSoundFrame(imuse_t* im, uint8_t* buf, int offset, int srcCons
 	 * centre 64 via (pan >> 1) + 64 with saturation. */
 	int panClamped = ImUtils_Clamp(im, (int)(int16_t)((pan >> 1) + 64), 0, 127);
 	int volClamped = ImUtils_Clamp(im, (int)vol, 0, 127);
-	return ImMixer_audioProcessFrame(im, &im->mixer.addFrameState, offset, volClamped, panClamped);
+	return ImMixer_audioProcessFrame(im, &im->mixer.addFrameState, offset, volClamped, panClamped, 0);
 }
 
 /* ===== Mix kernels =====
@@ -247,6 +282,35 @@ static int16_t mixer_mixStereo2x(int16_t* dst, const uint8_t* src, const int8_t*
 		dst[3] = (int16_t)(dst[3] + mixR);
 		last = dst[3];
 		dst += 4;
+	} while (--count);
+	return last;
+}
+
+static int16_t mixer_mixQuad1x(int16_t* dst, const uint8_t* src, const int8_t* const tables[4], int count) {
+	int16_t last = 0;
+	do {
+		uint8_t s = *src++;
+		dst[0] = (int16_t)(dst[0] + tables[0][s]);
+		dst[1] = (int16_t)(dst[1] + tables[1][s]);
+		dst[2] = (int16_t)(dst[2] + tables[2][s]);
+		dst[3] = (int16_t)(dst[3] + tables[3][s]);
+		last = dst[1];
+		dst += 4;
+	} while (--count);
+	return last;
+}
+
+static int16_t mixer_mixQuad2x(int16_t* dst, const uint8_t* src, const int8_t* const tables[4], int count) {
+	int16_t last = 0;
+	do {
+		uint8_t s = *src++;
+		for (int channel = 0; channel < 4; ++channel) {
+			int16_t mix = tables[channel][s];
+			dst[channel] = (int16_t)(dst[channel] + mix);
+			dst[channel + 4] = (int16_t)(dst[channel + 4] + mix);
+		}
+		last = dst[5];
+		dst += 8;
 	} while (--count);
 	return last;
 }

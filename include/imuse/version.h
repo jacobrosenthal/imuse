@@ -9,7 +9,7 @@
  * change to a public header (struct layout, function signature,
  * enum value reordering). Consumers can check at compile time:
  *
- *   #if IMUSE_ABI_VERSION != 5
+ *   #if IMUSE_ABI_VERSION != 6
  *   #error "libimuse ABI mismatch"
  *   #endif
  *
@@ -19,13 +19,14 @@
  */
 
 #define IMUSE_VERSION_MAJOR 0
-#define IMUSE_VERSION_MINOR 5
-#define IMUSE_VERSION_PATCH 1
+#define IMUSE_VERSION_MINOR 6
+#define IMUSE_VERSION_PATCH 0
 
 /* Bump on any public-API break. The triple above can advance for
  * additive changes without bumping ABI. */
-/* ABI 5 also rejects snapshots predating the ADLB per-part detune field. */
-#define IMUSE_ABI_VERSION 5
+/* ABI 5 also rejects snapshots predating the ADLB per-part detune field.
+ * ABI 6 adds ImuseConfig.waveOutputChannels and the wave-track depth field. */
+#define IMUSE_ABI_VERSION 6
 
 #define IMUSE__STR(x) #x
 #define IMUSE__XSTR(x) IMUSE__STR(x)

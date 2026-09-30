@@ -10,8 +10,8 @@
 /* 24-byte driver-owned output descriptor. mixSampleCount is the
  * number of source samples the mixer should consume per frame;
  * sampleStride is the stride between consecutive output samples
- * (1 for mono, 2 for stereo). stereoMode selects the panning
- * model used by audioProcessFrame. */
+ * (1 for mono, 2 for stereo, 4 for the port's quad FL,FR,BL,BR bus).
+ * stereoMode selects the panning model used by audioProcessFrame. */
 typedef struct ImDigitalOutBuf {
 	uint8_t* buffer;
 	int32_t writeCount;
@@ -47,8 +47,10 @@ int ImMixer_audioWriteToDriver(imuse_t* im);
 
 /* Add one source's frame to the int16 mix accumulator at the
  * given sample offset. volume is the post-group effective
- * volume; pan is 0..127 centre 64. */
-int16_t ImMixer_audioProcessFrame(imuse_t* im, ImSoundFrameState* state, int offset, int volume, int pan);
+ * volume; pan is 0..127 centre 64; depth is 0..127 front→rear
+ * and only affects a quad (sampleStride 4) output. */
+int16_t ImMixer_audioProcessFrame(imuse_t* im, ImSoundFrameState* state, int offset, int volume, int pan,
+								  int depth);
 
 /* Wave-driver callback installed by prepareDigitalOutput.
  * Invoked once per active voice with a decoded u8 PCM slice;

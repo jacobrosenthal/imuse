@@ -47,6 +47,7 @@ typedef struct ImWaveTrack {
 	int32_t jumpHook;    /* hook id for IMUSE_CMD_SET_HOOK */
 	uint32_t startFlags; /* ImuseWaveStartFlags captured before dispatch setup */
 	int32_t frequencyHz; /* explicit absolute playback rate; 0 = asset rate */
+	int32_t depth;       /* 0..127 front→rear (IMUSE_PARAM_SOUND_DEPTH) */
 } ImWaveTrack;
 
 /* ===== Lifecycle ===== */

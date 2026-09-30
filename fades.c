@@ -67,6 +67,7 @@ static int fade_param_is_valid(int param) {
 		case IMUSE_PARAM_SOUND_PRIORITY:
 		case IMUSE_PARAM_SOUND_VOL:
 		case IMUSE_PARAM_SOUND_PAN:
+		case IMUSE_PARAM_SOUND_DEPTH:
 		case IMUSE_PARAM_SOUND_DETUNE:
 		case IMUSE_PARAM_MIDI_SPEED:
 			return 1;

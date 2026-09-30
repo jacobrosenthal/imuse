@@ -154,6 +154,9 @@ typedef struct ImMixerState {
 	ImDigitalOutBuf* driverOutPtr;
 	int16_t* outBuf;
 	ImSoundFrameState addFrameState;
+	/* Equal-power front/rear split per IMUSE_PARAM_SOUND_DEPTH value,
+	 * Q7 (128 = unity). [depth][0] = front, [depth][1] = rear. */
+	uint8_t depthGain[128][2];
 } ImMixerState;
 
 typedef struct ImFilelistState {

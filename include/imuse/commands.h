@@ -91,7 +91,11 @@ typedef enum ImuseParam {
 	IMUSE_PARAM_MIDI_PART_VOL = 0x1500,
 	IMUSE_PARAM_MIDI_PART_PAN = 0x1600,
 	IMUSE_PARAM_MIDI_PART_PGM = 0x1700,
-	IMUSE_PARAM_WAVE_STREAM_FLAG = 0x1800
+	IMUSE_PARAM_WAVE_STREAM_FLAG = 0x1800,
+	/* Port extension: wave front/rear placement, 0 = front (default),
+	 * 64 = beside the listener, 127 = directly behind. Only audible when
+	 * waveOutputChannels is 4; stereo output ignores it. */
+	IMUSE_PARAM_SOUND_DEPTH = 0x1900
 } ImuseParam;
 
 typedef enum ImuseWaveStartFlags {
@@ -202,6 +206,9 @@ typedef struct ImuseConfig {
 	int32_t waveMixCount;                   /* 1..16; default 4 if invalid */
 	int32_t xwingTiming;                    /* DOS93 PIT: 4096 / 1193182 seconds, 3433 logical us. */
 	ImuseWaveOutputFilter waveOutputFilter; /* applies only to digital wave output */
+	int32_t waveOutputChannels;             /* 2 = stereo (0 → 2); 4 = quad FL,FR,BL,BR
+											   wave bus that honours
+											   IMUSE_PARAM_SOUND_DEPTH */
 } ImuseConfig;
 
 /* ===== Trigger / defer payload =====
@@ -274,6 +281,14 @@ int imuse_set_wave_output_filter(imuse_t* im, ImuseWaveOutputFilter filter);
  * through SPSC queues. */
 void imuse_mix_f32(imuse_t* im, float* buf, int frames);
 void imuse_mix_s16(imuse_t* im, int16_t* buf, int frames);
+
+/* Same mix with an explicit interleaved layout: channels is 2 (L,R) or
+ * 4 (FL,FR,BL,BR). MIDI plays on the front pair. A quad wave bus rendered
+ * into 2 channels folds the rear pair into the front at -3 dB; a stereo wave
+ * bus rendered into 4 channels leaves the rear pair silent. Returns 0, or -1
+ * for an unsupported channel count (buf is then left untouched). */
+int imuse_mix_f32_channels(imuse_t* im, float* buf, int frames, int channels);
+int imuse_mix_s16_channels(imuse_t* im, int16_t* buf, int frames, int channels);
 
 /* ===== Pause / resume =====
  *

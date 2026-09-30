@@ -12,27 +12,59 @@
 
 /* Bound audio-callback stack use independently of the requested frame count. */
 #define IMUSE_MIX_S16_CHUNK_FRAMES 512
+#define IMUSE_MIX_MAX_CHANNELS 4
 
-void imuse_mix_f32(imuse_t* im, float* buf, int frames) {
-	if (!buf || frames <= 0)
-		return;
-	if (!im) {
-		memset(buf, 0, (size_t)frames * 2u * sizeof(float));
+/* MIDI backends render interleaved stereo. Quad output renders them into a
+ * scratch pair and places them on the front channels. */
+static void mix_render_midi(imuse_t* im, float* buf, int frames, int channels) {
+	if (channels == 2) {
+		ImMidi_RenderFloat(im, buf, frames);
 		return;
 	}
-	ImMidi_RenderFloat(im, buf, frames);
-	ImWaveRenderer_PullSamples(im, buf, frames);
+	float stereo[IMUSE_MIX_S16_CHUNK_FRAMES * 2];
+	int done = 0;
+	while (done < frames) {
+		int chunk = frames - done;
+		if (chunk > IMUSE_MIX_S16_CHUNK_FRAMES)
+			chunk = IMUSE_MIX_S16_CHUNK_FRAMES;
+		ImMidi_RenderFloat(im, stereo, chunk);
+		float* out = &buf[(size_t)done * (size_t)channels];
+		for (int frame = 0; frame < chunk; ++frame) {
+			out[0] = stereo[2 * frame];
+			out[1] = stereo[2 * frame + 1];
+			for (int channel = 2; channel < channels; ++channel)
+				out[channel] = 0.0f;
+			out += channels;
+		}
+		done += chunk;
+	}
 }
 
-void imuse_mix_s16(imuse_t* im, int16_t* buf, int frames) {
+int imuse_mix_f32_channels(imuse_t* im, float* buf, int frames, int channels) {
+	if (channels != 2 && channels != 4)
+		return -1;
 	if (!buf || frames <= 0)
-		return;
+		return 0;
 	if (!im) {
-		memset(buf, 0, (size_t)frames * 2u * sizeof(int16_t));
-		return;
+		memset(buf, 0, (size_t)frames * (size_t)channels * sizeof(float));
+		return 0;
+	}
+	mix_render_midi(im, buf, frames, channels);
+	ImWaveRenderer_PullSamples(im, buf, frames, channels);
+	return 0;
+}
+
+int imuse_mix_s16_channels(imuse_t* im, int16_t* buf, int frames, int channels) {
+	if (channels != 2 && channels != 4)
+		return -1;
+	if (!buf || frames <= 0)
+		return 0;
+	if (!im) {
+		memset(buf, 0, (size_t)frames * (size_t)channels * sizeof(int16_t));
+		return 0;
 	}
 
-	float scratch[IMUSE_MIX_S16_CHUNK_FRAMES * 2];
+	float scratch[IMUSE_MIX_S16_CHUNK_FRAMES * IMUSE_MIX_MAX_CHANNELS];
 	int written = 0;
 	while (written < frames) {
 		int chunk = frames - written;
@@ -40,16 +72,16 @@ void imuse_mix_s16(imuse_t* im, int16_t* buf, int frames) {
 			chunk = IMUSE_MIX_S16_CHUNK_FRAMES;
 
 		/* Float bus: GMIDI overwrites, wave adds. Identical math to
-		 * imuse_mix_f32 except into the local scratch. */
-		ImMidi_RenderFloat(im, scratch, chunk);
-		ImWaveRenderer_PullSamples(im, scratch, chunk);
+		 * imuse_mix_f32_channels except into the local scratch. */
+		mix_render_midi(im, scratch, chunk, channels);
+		ImWaveRenderer_PullSamples(im, scratch, chunk, channels);
 
 		/* Saturating cast. Wave contribution is bounded ±1 by the
 		 * companding LUT; the synthesized contribution can still make the sum
 		 * exceed ±1 in dense passages — clamp before the integer cast or sign-flip
 		 * wraparound produces a click. */
-		int16_t* dst = &buf[2 * written];
-		int n = chunk * 2;
+		int16_t* dst = &buf[(size_t)written * (size_t)channels];
+		int n = chunk * channels;
 		for (int i = 0; i < n; ++i) {
 			float x = scratch[i];
 			if (x > 1.0f)
@@ -61,4 +93,11 @@ void imuse_mix_s16(imuse_t* im, int16_t* buf, int frames) {
 
 		written += chunk;
 	}
+	return 0;
+}
+
+void imuse_mix_f32(imuse_t* im, float* buf, int frames) { (void)imuse_mix_f32_channels(im, buf, frames, 2); }
+
+void imuse_mix_s16(imuse_t* im, int16_t* buf, int frames) {
+	(void)imuse_mix_s16_channels(im, buf, frames, 2);
 }

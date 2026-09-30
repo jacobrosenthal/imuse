@@ -48,16 +48,16 @@ static void wave_renderer_init_sb16_filter(ImWaveRendererState* r) {
 	memset(r->firHistory, 0, sizeof r->firHistory);
 }
 
-static int wave_renderer_read_source_frame(ImWaveRendererState* r, float* left, float* right) {
+static int wave_renderer_read_source_frame(ImWaveRendererState* r, float* frame) {
 	if (r->consumeOffset == 0 && atomic_load_explicit(&r->filledHalves, memory_order_acquire) <= 0) {
 		return 0;
 	}
 
 	const uint8_t* src = &r->halves[r->consumeIdx][r->consumeOffset];
-	*left = (float)((int)src[0] - 128) * (1.0f / 128.0f);
-	*right = (float)((int)src[1] - 128) * (1.0f / 128.0f);
-	r->consumeOffset += 2;
-	if (r->consumeOffset >= IM_WAVERENDERER_HALF_BYTES) {
+	for (int channel = 0; channel < r->channels; ++channel)
+		frame[channel] = (float)((int)src[channel] - 128) * (1.0f / 128.0f);
+	r->consumeOffset += r->channels;
+	if (r->consumeOffset >= r->halfBytes) {
 		r->consumeOffset = 0;
 		r->consumeIdx = (r->consumeIdx + 1) % IM_WAVERENDERER_NUM_HALVES;
 		atomic_fetch_sub_explicit(&r->filledHalves, 1, memory_order_release);
@@ -65,18 +65,19 @@ static int wave_renderer_read_source_frame(ImWaveRendererState* r, float* left, 
 	return 1;
 }
 
-static void wave_renderer_filter_frame(ImWaveRendererState* r, float left, float right, float* filteredLeft,
-									   float* filteredRight) {
+static void wave_renderer_filter_frame(ImWaveRendererState* r, float* frame) {
 	const int position = r->firHistoryPos;
 	const int center = IM_WAVERENDERER_FIR_PAIRS;
-	r->firHistory[position][0] = left;
-	r->firHistory[position][1] = right;
+	const int channels = r->channels;
+	float sum[IM_WAVERENDERER_MAX_CHANNELS];
+	for (int channel = 0; channel < channels; ++channel)
+		r->firHistory[position][channel] = frame[channel];
 
 	int centerIndex = position - center;
 	if (centerIndex < 0)
 		centerIndex += IM_WAVERENDERER_FIR_TAPS;
-	float sumLeft = r->firCenterCoefficient * r->firHistory[centerIndex][0];
-	float sumRight = r->firCenterCoefficient * r->firHistory[centerIndex][1];
+	for (int channel = 0; channel < channels; ++channel)
+		sum[channel] = r->firCenterCoefficient * r->firHistory[centerIndex][channel];
 
 	for (int pair = 0; pair < r->firPairCount; ++pair) {
 		const int tap = r->firPairTaps[pair];
@@ -87,13 +88,13 @@ static void wave_renderer_filter_frame(ImWaveRendererState* r, float left, float
 		if (oldIndex < 0)
 			oldIndex += IM_WAVERENDERER_FIR_TAPS;
 		const float coefficient = r->firPairCoefficients[pair];
-		sumLeft += coefficient * (r->firHistory[recentIndex][0] + r->firHistory[oldIndex][0]);
-		sumRight += coefficient * (r->firHistory[recentIndex][1] + r->firHistory[oldIndex][1]);
+		for (int channel = 0; channel < channels; ++channel)
+			sum[channel] += coefficient * (r->firHistory[recentIndex][channel] + r->firHistory[oldIndex][channel]);
 	}
 
 	r->firHistoryPos = (position + 1) % IM_WAVERENDERER_FIR_TAPS;
-	*filteredLeft = sumLeft;
-	*filteredRight = sumRight;
+	for (int channel = 0; channel < channels; ++channel)
+		frame[channel] = sum[channel];
 }
 
 int ImWaveRenderer_Init(imuse_t* im) {
@@ -103,8 +104,7 @@ int ImWaveRenderer_Init(imuse_t* im) {
 	r->produceArmed = 0;
 	r->consumeIdx = 0;
 	r->consumeOffset = 0;
-	r->heldLeft = 0.0f;
-	r->heldRight = 0.0f;
+	memset(r->held, 0, sizeof r->held);
 	r->repeatRemaining = 0;
 	r->waveFilterEnabled = 0;
 	r->firPairCount = 0;
@@ -115,11 +115,14 @@ int ImWaveRenderer_Init(imuse_t* im) {
 
 	/* Engine status block latches sampleRateMode from waveSpeed; same
 	 * convention as the DOS wave driver INIT path. The renderer is
-	 * stereo-only — the mono branch in mixer_audioProcessFrame still
-	 * works (it writes stride-1 samples), but every host today opens
-	 * a stereo device so stereo is the only mode wired up here. */
+	 * stereo by default; hosts may opt into the port's quad bus. The
+	 * mono branch in mixer_audioProcessFrame still works (it writes
+	 * stride-1 samples) but is not wired up here. Every half holds the
+	 * same number of frames in either layout, so the engine tick-vs-mix
+	 * ratio is unchanged. */
 	r->sampleRateMode = im->commands.config.waveSpeed ? 1 : 0;
-	r->channels = 2;
+	r->channels = im->commands.config.waveOutputChannels == 4 ? 4 : 2;
+	r->halfBytes = IM_WAVERENDERER_HALF_FRAMES * r->channels;
 
 	/* Engine-side production rate (matches the wave mixer kernels) and
 	 * consumer-side output rate (matches the MIDI backend and audio device).
@@ -145,9 +148,9 @@ int ImWaveRenderer_Init(imuse_t* im) {
 	atomic_init(&r->requestedFilter, r->waveFilterEnabled);
 
 	r->outDesc.buffer = r->halves[0];
-	r->outDesc.writeCount = IM_WAVERENDERER_HALF_BYTES;
-	r->outDesc.mixSampleCount = IM_WAVERENDERER_HALF_BYTES / 2; /* stereo */
-	r->outDesc.sampleStride = 2;
+	r->outDesc.writeCount = r->halfBytes;
+	r->outDesc.mixSampleCount = IM_WAVERENDERER_HALF_FRAMES;
+	r->outDesc.sampleStride = r->channels;
 	r->outDesc.field_10 = 0;
 	r->outDesc.stereoMode = 1; /* normal L/R panning. The mixer
 								* (ImMixer_audioProcessFrame) reads
@@ -158,7 +161,8 @@ int ImWaveRenderer_Init(imuse_t* im) {
 								* default (and ours) is mode 1. */
 
 	r->initialized = 1;
-	ImDebug_LogMsg(im, "wave-renderer module%s...", r->waveFilterEnabled ? " (SB16 filter)" : "");
+	ImDebug_LogMsg(im, "wave-renderer module%s%s...", r->channels == 4 ? " (quad)" : "",
+				   r->waveFilterEnabled ? " (SB16 filter)" : "");
 	return 0;
 }
 
@@ -208,9 +212,9 @@ void ImWaveRenderer_CommitProduceFrame(imuse_t* im) {
 	atomic_fetch_add_explicit(&r->filledHalves, 1, memory_order_release);
 }
 
-void ImWaveRenderer_PullSamples(imuse_t* im, float* dst, int frames) {
+void ImWaveRenderer_PullSamples(imuse_t* im, float* dst, int frames, int dstChannels) {
 	ImWaveRendererState* r = &im->wave_renderer;
-	if (!r->initialized || !dst || frames <= 0)
+	if (!r->initialized || !dst || frames <= 0 || (dstChannels != 2 && dstChannels != 4))
 		return;
 
 	int requested = atomic_load_explicit(&r->requestedFilter, memory_order_relaxed);
@@ -222,20 +226,29 @@ void ImWaveRenderer_PullSamples(imuse_t* im, float* dst, int frames) {
 
 	for (int frame = 0; frame < frames; ++frame) {
 		if (r->repeatRemaining <= 0) {
-			if (!wave_renderer_read_source_frame(r, &r->heldLeft, &r->heldRight)) {
-				r->heldLeft = 0.0f;
-				r->heldRight = 0.0f;
-			}
+			if (!wave_renderer_read_source_frame(r, r->held))
+				memset(r->held, 0, sizeof r->held);
 			r->repeatRemaining = r->upsampleRatio;
 		}
 
-		float left = r->heldLeft;
-		float right = r->heldRight;
+		float samples[IM_WAVERENDERER_MAX_CHANNELS];
+		memcpy(samples, r->held, sizeof samples);
 		--r->repeatRemaining;
 		if (r->waveFilterEnabled)
-			wave_renderer_filter_frame(r, left, right, &left, &right);
-		dst[2 * frame] += left;
-		dst[2 * frame + 1] += right;
+			wave_renderer_filter_frame(r, samples);
+
+		float* out = &dst[dstChannels * frame];
+		out[0] += samples[0];
+		out[1] += samples[1];
+		if (r->channels == 4) {
+			if (dstChannels == 4) {
+				out[2] += samples[2];
+				out[3] += samples[3];
+			} else {
+				out[0] += samples[2] * 0.70710678f;
+				out[1] += samples[3] * 0.70710678f;
+			}
+		}
 	}
 }
 

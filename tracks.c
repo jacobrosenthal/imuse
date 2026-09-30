@@ -206,6 +206,7 @@ int ImTracks_StartSound(imuse_t* im, intptr_t soundId, int priority, int bufId, 
 	t->vol = 127;
 	t->effVol = imuse_get_group_volume(im, IMUSE_GROUP_MASTER);
 	t->pan = 64;
+	t->depth = 0;
 	t->detune = 0;
 	t->transpose = 0;
 	t->detuneTrans = 0;
@@ -326,6 +327,12 @@ int ImTracks_SetParam(imuse_t* im, intptr_t soundId, int param, int value) {
 			t->pan = value;
 			return 0;
 
+		case IMUSE_PARAM_SOUND_DEPTH:
+			if ((unsigned int)value > 0x7Fu)
+				return -5;
+			t->depth = value;
+			return 0;
+
 		case IMUSE_PARAM_SOUND_FREQUENCY: {
 			if (value < 0 || t->data->streamPtr)
 				return -5;
@@ -396,6 +403,8 @@ int ImTracks_GetParam(imuse_t* im, intptr_t soundId, int param) {
 				return t->vol;
 			case IMUSE_PARAM_SOUND_PAN:
 				return t->pan;
+			case IMUSE_PARAM_SOUND_DEPTH:
+				return t->depth;
 			case IMUSE_PARAM_SOUND_FREQUENCY:
 				return t->frequencyHz ? t->frequencyHz : (int)t->data->sourceRateHz;
 			case IMUSE_PARAM_SOUND_DETUNE:

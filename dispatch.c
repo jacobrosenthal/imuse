@@ -158,7 +158,8 @@ static void play_variable_rate_frame(imuse_t* im, ImWaveTrack* track, ImDigitalO
 		im->dispatch.mixFrameState.buffer = out;
 		im->dispatch.mixFrameState.count = generated;
 		im->dispatch.mixFrameState.sourceIsHighRate = 1;
-		ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, 0, track->effVol, track->pan);
+		ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, 0, track->effVol, track->pan,
+								  track->depth);
 	}
 	if (terminal == -1)
 		ImTracks_Clear(im, track);
@@ -192,7 +193,7 @@ void ImDispatch_PlaySoundFrame(imuse_t* im, struct ImWaveTrack* track, struct Im
 		im->dispatch.mixFrameState.sourceIsHighRate = d->sourceIsHighRate;
 
 		int fadeVol = ImDispatch_UpdateFadeMixVolume(im, d, fadeCount);
-		ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, 0, fadeVol, track->pan);
+		ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, 0, fadeVol, track->pan, track->depth);
 
 		d->fadeRemaining -= fadeCount;
 		d->fadeBuf += fadeCount;
@@ -260,7 +261,8 @@ void ImDispatch_PlaySoundFrame(imuse_t* im, struct ImWaveTrack* track, struct Im
 			im->dispatch.mixFrameState.sourceIsHighRate = d->sourceIsHighRate;
 
 			int mixVol = d->fadeBuf ? ImDispatch_UpdateFadeSlope(im, d) : track->effVol;
-			ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, offset, mixVol, track->pan);
+			ImMixer_audioProcessFrame(im, &im->dispatch.mixFrameState, offset, mixVol, track->pan,
+									  track->depth);
 
 			offset += mixCount;
 			samplesLeft -= mixCount;
